@@ -7,7 +7,7 @@ a simple interface for using the agent.
 
 import logging
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime
 
 # Import components
@@ -72,15 +72,19 @@ class AITradingAgent:
         logger.info("Initializing components")
         
         # Initialize components
+        self._initialize_components()
+        
+        self.is_initialized = True
+        logger.info("AI Trading Agent initialized successfully")
+        return True
+    
+    def _initialize_components(self):
+        """Initialize all components of the trading agent."""
         self.data_collector = DataCollector(self.api_client)
         self.analysis_engine = AnalysisEngine()
         self.strategy_processor = StrategyProcessor()
         self.recommendation_generator = RecommendationGenerator()
         self.execution_manager = ExecutionManager(self.api_client)
-        
-        self.is_initialized = True
-        logger.info("AI Trading Agent initialized successfully")
-        return True
     
     def add_strategy(self, strategy_id: str, strategy_params: Dict) -> bool:
         """
@@ -157,45 +161,10 @@ class AITradingAgent:
         strategy_params = self.active_strategies[strategy_id]
         
         # Get markets based on strategy parameters
-        markets = []
-        
-        # Get markets by categories
-        categories = strategy_params.get("categories", [])
-        for category in categories:
-            category_markets = self.data_collector.get_markets_by_category(category)
-            markets.extend(category_markets)
-        
-        # If no categories specified or no markets found, get markets by time horizon
-        if not markets:
-            time_horizon = strategy_params.get("timeHorizon", "1h")
-            hours = 1  # Default to 1 hour
-            
-            if time_horizon.endswith("h"):
-                hours = int(time_horizon[:-1])
-            elif time_horizon.endswith("m"):
-                hours = int(time_horizon[:-1]) / 60
-            
-            markets = self.data_collector.get_markets_by_time_horizon(hours)
-        
-        # Limit number of markets
-        markets = markets[:max_markets]
+        markets = self._get_markets(strategy_params, max_markets)
         
         # Process markets
-        all_opportunities = []
-        market_data_map = {}
-        
-        for market in markets:
-            ticker = market["ticker"]
-            
-            # Get market data
-            market_data = self.data_collector.get_market_data_bundle(ticker)
-            market_data_map[ticker] = market_data
-            
-            # Analyze market data
-            analysis_results = self.analysis_engine.process_market_data(market_data)
-            
-            # Add opportunities
-            all_opportunities.extend(analysis_results["opportunities"])
+        all_opportunities, market_data_map = self._process_markets(markets)
         
         # Apply strategy to opportunities
         filtered_opportunities = self.strategy_processor.apply_strategy(
@@ -203,19 +172,7 @@ class AITradingAgent:
         )
         
         # Generate recommendations
-        recommendations = []
-        for opportunity in filtered_opportunities:
-            # Get market data for this opportunity
-            ticker = opportunity.get("ticker", "unknown")
-            market_data = market_data_map.get(ticker, {})
-            
-            # Generate recommendation
-            recommendation = self.recommendation_generator.generate_recommendations(
-                [opportunity], market_data
-            )
-            
-            if recommendation:
-                recommendations.extend(recommendation)
+        recommendations = self._generate_recommendations(filtered_opportunities, market_data_map)
         
         # Prioritize recommendations
         prioritized_recommendations = self.recommendation_generator.prioritize_recommendations(
@@ -223,6 +180,54 @@ class AITradingAgent:
         )
         
         return prioritized_recommendations
+    
+    def _get_markets(self, strategy_params: Dict, max_markets: int) -> List[Dict]:
+        """Get markets based on strategy parameters."""
+        markets = []
+        categories = strategy_params.get("categories", [])
+        for category in categories:
+            category_markets = self.data_collector.get_markets_by_category(category)
+            markets.extend(category_markets)
+        
+        if not markets:
+            time_horizon = strategy_params.get("timeHorizon", "1h")
+            hours = self._parse_time_horizon(time_horizon)
+            markets = self.data_collector.get_markets_by_time_horizon(hours)
+        
+        return markets[:max_markets]
+    
+    def _parse_time_horizon(self, time_horizon: str) -> int:
+        """Parse time horizon string to hours."""
+        if time_horizon.endswith("h"):
+            return int(time_horizon[:-1])
+        elif time_horizon.endswith("m"):
+            return int(time_horizon[:-1]) / 60
+        return 1  # Default to 1 hour
+    
+    def _process_markets(self, markets: List[Dict]) -> Tuple[List[Dict], Dict[str, Dict]]:
+        """Process markets to find opportunities."""
+        all_opportunities = []
+        market_data_map = {}
+        for market in markets:
+            ticker = market["ticker"]
+            market_data = self.data_collector.get_market_data_bundle(ticker)
+            market_data_map[ticker] = market_data
+            analysis_results = self.analysis_engine.process_market_data(market_data)
+            all_opportunities.extend(analysis_results["opportunities"])
+        return all_opportunities, market_data_map
+    
+    def _generate_recommendations(self, filtered_opportunities: List[Dict], market_data_map: Dict[str, Dict]) -> List[Dict]:
+        """Generate recommendations from filtered opportunities."""
+        recommendations = []
+        for opportunity in filtered_opportunities:
+            ticker = opportunity.get("ticker", "unknown")
+            market_data = market_data_map.get(ticker, {})
+            recommendation = self.recommendation_generator.generate_recommendations(
+                [opportunity], market_data
+            )
+            if recommendation:
+                recommendations.extend(recommendation)
+        return recommendations
     
     def execute_recommendation(self, recommendation: Dict, execution_mode: str = None) -> Dict:
         """
@@ -242,12 +247,7 @@ class AITradingAgent:
         logger.info(f"Executing recommendation for {recommendation.get('asset')}")
         
         # Get strategy execution mode if not specified
-        if execution_mode is None:
-            strategy_id = recommendation.get("strategy_id")
-            if strategy_id in self.active_strategies:
-                execution_mode = self.active_strategies[strategy_id].get("executionMode", "manual")
-            else:
-                execution_mode = "manual"
+        execution_mode = self._get_execution_mode(recommendation, execution_mode)
         
         # Execute trade
         result = self.execution_manager.execute_trade(recommendation, execution_mode)
@@ -258,6 +258,14 @@ class AITradingAgent:
         )
         
         return result
+    
+    def _get_execution_mode(self, recommendation: Dict, execution_mode: Optional[str]) -> str:
+        """Get execution mode for a recommendation."""
+        if execution_mode is None:
+            strategy_id = recommendation.get("strategy_id")
+            if strategy_id in self.active_strategies:
+                return self.active_strategies[strategy_id].get("executionMode", "manual")
+        return execution_mode or "manual"
     
     def start_trading(self, check_interval: int = 60) -> None:
         """
@@ -276,29 +284,24 @@ class AITradingAgent:
         
         try:
             while self.running:
-                # Process each strategy
-                for strategy_id, strategy_params in self.active_strategies.items():
-                    # Get recommendations
-                    recommendations = self.get_recommendations(strategy_id)
-                    
-                    # Execute recommendations if in YOLO mode
-                    if strategy_params.get("executionMode") == "yolo":
-                        for recommendation in recommendations:
-                            self.execute_recommendation(recommendation, "yolo")
-                
-                # Monitor positions
+                self._process_strategies()
                 self._monitor_positions()
-                
-                # Wait for next check
                 logger.info(f"Waiting {check_interval} seconds until next check")
                 time.sleep(check_interval)
-                
         except KeyboardInterrupt:
             logger.info("Trading loop stopped by user")
         except Exception as e:
             logger.error(f"Error in trading loop: {str(e)}")
         finally:
             self.running = False
+    
+    def _process_strategies(self):
+        """Process each active strategy to get and execute recommendations."""
+        for strategy_id, strategy_params in self.active_strategies.items():
+            recommendations = self.get_recommendations(strategy_id)
+            if strategy_params.get("executionMode") == "yolo":
+                for recommendation in recommendations:
+                    self.execute_recommendation(recommendation, "yolo")
     
     def stop_trading(self) -> None:
         """Stop automated trading loop."""
